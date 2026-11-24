@@ -1,0 +1,209 @@
+<!doctype html><html lang="zh-Hant-TW"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Hi-Qi 購物商城</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
+<style>
+:root{--red:#d62828;--bg:#fff;--fg:#222;--mut:#777;--line:#e5e5e5}
+@media(prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--line:#333}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,"Noto Sans TC",sans-serif;background:var(--bg);color:var(--fg)}
+header{background:var(--red);color:#fff;padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header b{font-size:24px}header input{flex:1;min-width:140px;padding:8px;border:0;border-radius:2px}
+button{background:var(--red);color:#fff;border:0;padding:8px 14px;border-radius:2px;cursor:pointer}
+header button{background:#fff;color:var(--red)}main{max-width:1100px;margin:auto;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.card{border:1px solid var(--line);padding:10px}.card .img{aspect-ratio:1;background:#eee center/cover;margin-bottom:8px}
+.price{color:var(--red);font-weight:700}.mut{color:var(--mut);font-size:13px}
+.box{border:1px solid var(--line);padding:14px;margin-top:16px}input,select{padding:8px;margin:4px 0;max-width:100%}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 18px;display:none}
+</style></head><body>
+<header><b>Hi-Qi</b><input id="q" placeholder="搜尋商品"><button onclick="load()">搜尋</button>
+<span id="who"></span><button id="authBtn" onclick="authOpen()">登入／註冊</button><button onclick="show('cart')">購物車 (<span id="cn">0</span>)</button><button onclick="show('orders')">我的訂單</button><button onclick="show('merchant')">商家中心</button><button onclick="show('favs')">收藏</button><button onclick="show('coupons')">優惠券中心</button><button id="adminBtn" hidden onclick="show('admin')">管理後台</button></header>
+<main>
+<section id="shop"><div id="site"></div><div id="camp"></div>
+<div class="box" style="margin:0 0 12px"><select id="fc" onchange="load()"><option value="">全部分類</option></select> <select id="fs" onchange="load()"><option value="">最新上架</option><option value="hot">熱門商品</option><option value="price_asc">價格低到高</option><option value="price_desc">價格高到低</option></select> NT$<input id="fmin" type="number" min="0" style="width:80px" onchange="load()">~<input id="fmax" type="number" min="0" style="width:80px" onchange="load()"> <label><input type="checkbox" id="fi" onchange="load()"> 只看有庫存</label></div>
+<div class="grid" id="list"></div></section>
+<section id="cart" hidden>
+ <h3>購物車與結帳</h3><div id="items"></div>
+ <div class="box"><input id="code" placeholder="輸入優惠券代碼"> <button onclick="apply()">套用</button> <button onclick="rm()" style="background:#888">移除</button>
+ <div>到貨地點:<select id="pickup"><option value="">請選擇</option></select></div>
+ <p id="sum"></p><button onclick="checkout()">確認訂單</button></div>
+</section>
+<section id="orders" hidden></section>
+<section id="merchant" hidden></section>
+<section id="detail" hidden></section>
+<section id="favs" hidden></section>
+<section id="coupons" hidden></section>
+<section id="campaign" hidden></section>
+<section id="admin" hidden></section>
+<section id="authBox" class="box" hidden>
+ <input id="u" placeholder="使用者名稱(註冊用)"><br><input id="e" type="email" placeholder="電子郵件"><br>
+ <input id="p" type="password" placeholder="密碼(至少 6 碼)"><br><input id="p2" type="password" placeholder="確認密碼(註冊用)"><br>
+ <button onclick="signIn()">登入</button> <button onclick="signUp()">註冊</button> <button onclick="signOut()" style="background:#888">登出</button>
+</section>
+</main><footer class="mut" style="text-align:center;padding:24px">© Hi-Qi 購物商城・綜合型購物平台</footer><div id="toast"></div>
+<script>
+let sb, session, cart = JSON.parse(localStorage.getItem('hq_cart')||'[]'), products=[], quote=null;
+const $=id=>document.getElementById(id), money=n=>'NT$'+Number(n).toLocaleString('zh-TW');
+const esc=t=>String(t??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const toast=m=>{const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2600)};
+const api=async(url,opt={})=>{const r=await fetch(url,{...opt,headers:{'Content-Type':'application/json',...(session?{Authorization:'Bearer '+session.access_token}:{})},body:opt.body&&JSON.stringify(opt.body)});
+ const j=await r.json();if(!r.ok)throw new Error(j.error||'發生錯誤');return j};
+const show=s=>{['shop','cart','orders','merchant','detail','favs','coupons','campaign','admin','authBox'].forEach(i=>$(i).hidden=i!==s);if(s==='cart')renderCart();if(s==='orders')loadOrders();if(s==='merchant')loadMerchant();if(s==='favs')loadFavs();if(s==='coupons')loadCoupons();if(s==='campaign')loadCampaign().then(showCampaign);if(s==='admin')loadAdmin()};
+const authOpen=()=>show('authBox');
+async function init(){
+ const c=await api('/api/config');sb=supabase.createClient(c.url,c.anonKey);
+ sb.auth.onAuthStateChange((_,s)=>{session=s;$('who').textContent=s?(s.user.user_metadata.username||s.user.email):'';refreshMe();});
+ session=(await sb.auth.getSession()).data.session;$('who').textContent=session?(session.user.user_metadata.username||session.user.email):'';
+ const pk=await api('/api/pickups');pk.forEach(p=>$('pickup').add(new Option(p.name,p.id)));
+ load();updateCount();refreshMe();loadCampaign();loadSite();api('/api/categories').then(c=>c.forEach(x=>$('fc').add(new Option(x.name,x.id))));
+}
+async function load(){products=await api('/api/products?'+new URLSearchParams({q:$('q').value,category:$('fc').value,sort:$('fs').value,min:$('fmin').value,max:$('fmax').value,instock:$('fi').checked?'1':''}));
+ $('list').innerHTML=products.length?products.map(p=>`<div class="card"><div class="img" onclick="detail('${p.id}')" style="cursor:pointer;background-image:url('${esc(p.image_url||'')}')"></div>
+ <div style="cursor:pointer" onclick="detail('${p.id}')">${esc(p.name)}</div><div class="price">${money(p.price)} ${p.original_price?`<s class="mut">${money(p.original_price)}</s>`:''}</div>
+ <div class="mut">${esc(p.merchants?.name||'Hi-Qi 自營')}・已售 ${p.sold}</div><button onclick="add('${p.id}')" ${p.stock?'':'disabled'}>${p.stock?'加入購物車':'已售完'}</button></div>`).join(''):'<p class="mut">目前沒有商品</p>'}
+function add(id){const i=cart.find(c=>c.product_id===id);i?i.qty++:cart.push({product_id:id,qty:1});save();toast('已加入購物車')}
+function save(){localStorage.setItem('hq_cart',JSON.stringify(cart));quote=null;updateCount()}
+function updateCount(){$('cn').textContent=cart.reduce((s,c)=>s+c.qty,0)}
+function setQty(id,v){cart.find(c=>c.product_id===id).qty=Math.max(1,+v);save();renderCart()}
+function del(id){cart=cart.filter(c=>c.product_id!==id);save();renderCart()}
+async function loadOrders(){try{if(!session)throw new Error('請先登入');const o=await api('/api/orders');
+ $('orders').innerHTML=o.map(x=>`<div class="box"><b>${x.order_no}</b>・${x.status}<br>${x.order_items.map(i=>`${esc(i.name)} × ${i.qty}`).join('、')}<br>${x.order_gifts&&x.order_gifts.length?'贈品:'+x.order_gifts.map(g=>esc(g.name)).join('、')+'<br>':''}到貨地點:${x.pickup_locations.name}<br>預計到貨:${new Date(x.eta_date+'T00:00:00').toLocaleDateString('zh-TW',{year:'numeric',month:'long',day:'numeric'})}<br>金額:${money(x.total)}</div>`).join('')||'<p class="mut">尚無訂單</p>'}catch(e){$('orders').innerHTML='';toast(e.message)}}
+async function signUp(){try{await api('/api/register',{method:'POST',body:{username:$('u').value,email:$('e').value,password:$('p').value,confirm:$('p2').value}});
+ const{error}=await sb.auth.signInWithPassword({email:$('e').value,password:$('p').value});if(error)throw error;toast('註冊成功,已自動登入');show('shop')}catch(e){toast(e.message)}}
+async function signIn(){const{error}=await sb.auth.signInWithPassword({email:$('e').value,password:$('p').value});toast(error?(/Invalid login/i.test(error.message)?'電子郵件或密碼錯誤':error.message):'登入成功');if(!error)show('shop')}
+async function signOut(){await sb.auth.signOut();toast('已登出');show('shop')}
+let mps=[];
+async function loadMerchant(){const box=$('merchant');try{if(!session)throw new Error('請先登入');
+ const m=await api('/api/merchant/me');
+ if(!m){box.innerHTML=`<h3>商家入駐</h3><div class="box"><input id="mn" placeholder="商家名稱"><br><input id="mi" placeholder="商家介紹"><br><input id="mc" placeholder="聯絡資訊"><br><button onclick="mReg()">申請入駐</button></div>`;return}
+ const [cats,ps,os]=await Promise.all([api('/api/categories'),api('/api/merchant/products'),api('/api/merchant/orders')]);mps=ps;
+ const amt=os.reduce((s,x)=>s+x.price*x.qty,0),qty=os.reduce((s,x)=>s+x.qty,0),n=new Set(os.map(x=>x.orders.id)).size;
+ const ST=['訂單成立','訂單處理中','商品準備中','已出貨','已到貨','已完成','已取消'];
+ const seen=new Set();
+ box.innerHTML=`<h3>${esc(m.name)} 商家中心</h3><p class="mut">訂單數 ${n}・銷售數量 ${qty}・銷售總額 ${money(amt)}</p>
+ <div class="box"><b id="mft">新增商品</b><input type="hidden" id="pid"><br>
+ <input id="pn" placeholder="商品名稱"> <input id="pp" type="number" min="0" placeholder="價格"> <input id="po" type="number" min="0" placeholder="原價(選填)"> <input id="pk" type="number" min="0" placeholder="庫存"><br>
+ <input id="pi" placeholder="商品圖片網址(https://...)" style="width:60%"> <select id="pc"><option value="">選擇分類</option>${cats.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+ <select id="pt"><option value="active">上架</option><option value="hidden">下架</option></select><br>
+ <input id="pd" placeholder="商品介紹" style="width:90%"><br>贈品(選填,名稱留空表示不送):<input id="gn" placeholder="贈品名稱"> <input id="gi" placeholder="贈品圖片網址"> <input id="gs" type="number" min="0" placeholder="贈品數量(空白=不限)" style="width:160px"> 購買滿 <input id="gm" type="number" min="1" value="1" style="width:70px"> 件才送<br><button onclick="mSave()">儲存商品</button> <button onclick="loadMerchant()" style="background:#888">清除</button></div>
+ <h4>我的商品</h4>${ps.map(p=>`<div class="box">${esc(p.name)}・${money(p.price)}・庫存 ${p.stock}・${p.status==='active'?'上架中':'已下架'} <button onclick="mEdit('${p.id}')">編輯</button> <button onclick="mDel('${p.id}')" style="background:#888">刪除</button></div>`).join('')||'<p class="mut">尚未上架商品</p>'}
+ <h4>訂單</h4>${os.filter(x=>!seen.has(x.orders.id)&&seen.add(x.orders.id)).map(x=>`<div class="box"><b>${x.orders.order_no}</b>・${x.orders.pickup_locations.name}・預計到貨 ${x.orders.eta_date}<br>${os.filter(y=>y.orders.id===x.orders.id).map(y=>`${esc(y.name)} × ${y.qty}`).join('、')}<br>
+ <select onchange="mOrd('${x.orders.id}',this.value)">${ST.map(s=>`<option ${s===x.orders.status?'selected':''}>${s}</option>`).join('')}</select></div>`).join('')||'<p class="mut">尚無訂單</p>'}`;
+}catch(e){box.innerHTML='';toast(e.message)}}
+async function mReg(){try{await api('/api/merchant/register',{method:'POST',body:{name:$('mn').value,intro:$('mi').value,contact:$('mc').value}});toast('入駐成功');loadMerchant()}catch(e){toast(e.message)}}
+async function mSave(){try{const id=$('pid').value,body={name:$('pn').value,price:$('pp').value,original_price:$('po').value,stock:$('pk').value,image_url:$('pi').value,category_id:$('pc').value,status:$('pt').value,description:$('pd').value,gift_name:$('gn').value,gift_image:$('gi').value,gift_stock:$('gs').value,gift_min_qty:$('gm').value};
+ await api('/api/merchant/products'+(id?'/'+id:''),{method:id?'PUT':'POST',body});toast(id?'商品已更新':'商品已新增');loadMerchant();load()}catch(e){toast(e.message)}}
+function mEdit(id){const p=mps.find(x=>x.id===id);$('pid').value=id;$('pn').value=p.name;$('pp').value=p.price;$('po').value=p.original_price||'';$('pk').value=p.stock;$('pi').value=p.image_url||'';$('pc').value=p.category_id||'';$('pt').value=p.status;$('pd').value=p.description||'';const g=p.product_gifts&&p.product_gifts[0]&&p.product_gifts[0].gifts;$('gn').value=g?g.name:'';$('gi').value=g?g.image_url||'':'';$('gs').value=g&&g.stock!==null?g.stock:'';$('gm').value=g?g.min_qty:1;$('mft').textContent='編輯商品';window.scrollTo(0,0)}
+async function mDel(id){if(!confirm('確定刪除這個商品?'))return;try{const r=await api('/api/merchant/products/'+id,{method:'DELETE'});toast(r.hidden?'此商品已有訂單,已改為下架':'已刪除');loadMerchant();load()}catch(e){toast(e.message)}}
+async function mOrd(id,status){try{await api('/api/merchant/orders/'+id+'/status',{method:'PUT',body:{status}});toast('訂單狀態已更新')}catch(e){toast(e.message)}}
+let cur=null;
+const stars=n=>'★'.repeat(Math.round(n))+'☆'.repeat(5-Math.round(n));
+async function detail(id){try{cur=await api('/api/products/'+id);show('detail');renderDetail()}catch(e){toast(e.message)}}
+function renderDetail(){const p=cur;
+ $('detail').innerHTML=`<button onclick="show('shop')" style="background:#888">← 返回商品列表</button>
+ <div class="box" style="display:flex;gap:16px;flex-wrap:wrap"><div style="flex:1;min-width:240px;max-width:420px"><div style="aspect-ratio:1;background:#eee center/cover url('${esc(p.image_url||'')}')"></div></div>
+ <div style="flex:1;min-width:240px"><h2 style="margin-top:0">${esc(p.name)}</h2>
+ <div class="mut">${p.reviews.length?`${stars(p.avg)} ${p.avg}(${p.reviews.length} 則評論)`:'尚無評價'}・已售 ${p.sold}</div>
+ <div class="price" style="font-size:24px">${money(p.price)} ${p.original_price?`<s class="mut" style="font-size:15px">${money(p.original_price)}</s>`:''}</div>
+ <p class="mut">商家:${esc(p.merchants?.name||'Hi-Qi 自營')}${p.product_categories?`・分類:${esc(p.product_categories.name)}`:''}<br>庫存:${p.stock}</p>
+ <p>${esc(p.description||'')}</p>
+ ${p.gift?`<p>🎁 本商品附贈:<b>${esc(p.gift.name)}</b>${p.gift.min_qty>1?`(購買滿 ${p.gift.min_qty} 件)`:''}${p.gift.sold_out?' <b class="price">贈品已送完</b>':''}</p>`:''}
+ ${p.stock?`數量:<input id="dq" type="number" min="1" max="${p.stock}" value="1" style="width:70px"><br>
+ <button onclick="addQty(false)">加入購物車</button> <button onclick="addQty(true)">立即購買</button>`:'<b>已售完</b>'}
+ <button onclick="toggleFav()" style="background:${p.fav?'#888':'var(--red)'}">${p.fav?'取消收藏':'收藏商品'}</button></div></div>
+ <h3>商品評論</h3>
+ ${session?`<div class="box"><select id="rr">${[5,4,3,2,1].map(n=>`<option value="${n}">${'★'.repeat(n)}</option>`).join('')}</select><br>
+ <input id="rc" placeholder="分享你的使用心得" style="width:90%" maxlength="500"><br><button onclick="postReview()">送出評論</button> <span class="mut">同一商品重複送出會更新你原本的評論</span></div>`:'<p class="mut">登入後才能留言</p>'}
+ ${p.reviews.map(r=>`<div class="box"><b>${esc(r.username)}</b> <span class="price">${stars(r.rating)}</span> <span class="mut">${new Date(r.created_at).toLocaleDateString('zh-TW',{timeZone:'Asia/Taipei'})}</span>
+ ${r.mine?`<button onclick="delReview('${r.id}')" style="float:right;background:#888">刪除</button>`:''}<br>${esc(r.content)}</div>`).join('')||'<p class="mut">還沒有評論,成為第一個留言的人吧</p>'}`}
+function addQty(buy){const p=cur,q=Math.max(1,parseInt($('dq').value)||1),i=cart.find(c=>c.product_id===p.id),have=i?i.qty:0;
+ if(have+q>p.stock)return toast(`數量不能超過庫存(${p.stock}),購物車已有 ${have} 件`);
+ i?i.qty+=q:cart.push({product_id:p.id,qty:q});save();
+ if(!products.find(x=>x.id===p.id))products.push(p);
+ if(buy)show('cart');else toast('已加入購物車')}
+async function toggleFav(){try{if(!session)throw new Error('請先登入');await api('/api/favorites/'+cur.id,{method:cur.fav?'DELETE':'POST'});cur.fav=!cur.fav;renderDetail();toast(cur.fav?'已加入收藏':'已取消收藏')}catch(e){toast(e.message)}}
+async function postReview(){try{const r=await api('/api/products/'+cur.id+'/reviews',{method:'POST',body:{rating:$('rr').value,content:$('rc').value}});toast(r.updated?'評論已更新':'評論已送出');detail(cur.id)}catch(e){toast(e.message)}}
+async function delReview(id){try{await api('/api/reviews/'+id,{method:'DELETE'});toast('評論已刪除');detail(cur.id)}catch(e){toast(e.message)}}
+async function loadFavs(){try{if(!session)throw new Error('請先登入');const f=await api('/api/favorites');
+ $('favs').innerHTML=f.length?`<h3>我的收藏</h3><div class="grid">${f.map(p=>`<div class="card"><div class="img" onclick="detail('${p.id}')" style="cursor:pointer;background-image:url('${esc(p.image_url||'')}')"></div><div>${esc(p.name)}</div><div class="price">${money(p.price)}</div><button onclick="detail('${p.id}')">查看商品</button></div>`).join('')}</div>`:'<p class="mut">還沒有收藏商品</p>'}catch(e){$('favs').innerHTML='';toast(e.message)}}
+let appliedCode='',CAMP=null,CTAB='coupons_avail',CC=[],AK='coupons',isAdmin=false;
+const fmtDate=i=>new Date(i).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
+const toLocal=i=>new Date(i).toLocaleString('sv-SE',{timeZone:'Asia/Taipei'}).slice(0,16).replace(' ','T');
+const fmtCd=ms=>{if(ms<=0)return '已結束';const s=Math.floor(ms/1000);return `${Math.floor(s/86400)}天 ${Math.floor(s%86400/3600)}時 ${Math.floor(s%3600/60)}分 ${s%60}秒`};
+setInterval(()=>document.querySelectorAll('[data-end]').forEach(e=>{e.textContent=fmtCd(new Date(e.dataset.end)-Date.now())}),1000);
+async function refreshMe(){isAdmin=false;if(session){try{isAdmin=(await api('/api/me')).role==='admin'}catch(e){}}$('adminBtn').hidden=!isAdmin}
+
+async function renderCart(){
+ $('items').innerHTML=cart.map(c=>{const p=products.find(x=>x.id===c.product_id);return p?`<div>${esc(p.name)} × <input type="number" min="1" max="${p.stock}" value="${c.qty}" style="width:60px" onchange="setQty('${c.product_id}',this.value)"> = ${money(p.price*c.qty)} <button onclick="del('${c.product_id}')">刪除</button></div>`:''}).join('')||'<p class="mut">購物車是空的</p>';
+ if(!cart.length){$('sum').innerHTML='';return}
+ try{quote=await api('/api/quote',{method:'POST',body:{items:cart,code:appliedCode}})}
+ catch(e){toast(e.message);if(appliedCode){appliedCode='';$('code').value='';return renderCart()}return}
+ const q=quote;
+ $('sum').innerHTML=`商品總額:${money(q.subtotal)}<br>${q.campaign_name?`${esc(q.campaign_name)}優惠:-${money(q.campaign_discount)}<br>`:''}${q.coupon_name?`優惠券「${esc(q.coupon_name)}」折抵:-${money(q.coupon_discount)}<br>`:''}運費:${q.shipping?money(q.shipping):'NT$0(免運)'}<br><b>最終付款金額:${money(q.total)}</b>${(q.gifts||[]).map(g=>`<br>贈品:${esc(g.name)}${g.available?'':'(贈品已送完)'}`).join('')}`}
+async function apply(){if(!session){toast('請先登入');return}appliedCode=$('code').value.trim();if(!appliedCode)return;await renderCart();if(appliedCode)toast('已套用優惠券')}
+function rm(){appliedCode='';$('code').value='';renderCart()}
+async function checkout(){try{if(!session)throw new Error('請先登入');if(!$('pickup').value)throw new Error('請選擇到貨地點');
+ await api('/api/orders',{method:'POST',body:{items:cart,pickup_id:$('pickup').value,code:appliedCode}});
+ cart=[];save();rm();toast('訂單已成立');load();show('orders')}catch(e){toast(e.message)}}
+
+async function loadCampaign(){try{CAMP=await api('/api/campaign');const a=CAMP.active,u=CAMP.upcoming,bs='background:#fff;color:var(--red);margin-top:8px';
+ $('camp').innerHTML=a?`<div class="box" style="background:var(--red);color:#fff;margin:0 0 16px"><b style="font-size:20px">${esc(a.name)}</b><br>${esc(a.banner_text||'')}<br>活動倒數:<span data-end="${a.ends_at}"></span><br><button onclick="show('campaign')" style="${bs}">前往活動專區</button> <button onclick="show('coupons')" style="${bs}">優惠券中心</button></div>`
+ :u?`<div class="box mut" style="margin:0 0 16px">下一檔:${esc(u.name)},開始倒數 <span data-end="${u.starts_at}"></span> <button onclick="show('coupons')">優惠券中心</button></div>`
+ :`<div class="box" style="margin:0 0 16px"><button onclick="show('coupons')">優惠券中心</button></div>`}catch(e){}}
+function showCampaign(){const a=CAMP&&CAMP.active;
+ if(!a){$('campaign').innerHTML='<p class="mut">目前沒有進行中的活動</p>';return}
+ const rules=[a.discount_percent?`全站 ${(100-a.discount_percent)/10} 折`:'',a.threshold_min?`滿 ${money(a.threshold_min)} 折 ${money(a.threshold_off)}`:'',a.free_ship_min?`滿 ${money(a.free_ship_min)} 免運`:'',a.allow_coupon?'可與優惠券併用':'不可與優惠券併用'].filter(Boolean);
+ $('campaign').innerHTML=`<div class="box" style="background:var(--red);color:#fff"><h2 style="margin:0">${esc(a.name)}</h2>${esc(a.banner_text||'')}<br>倒數:<span data-end="${a.ends_at}"></span><br>${fmtDate(a.starts_at)} ~ ${fmtDate(a.ends_at)}</div>
+ <div class="box"><b>活動優惠</b><br>${rules.map(esc).join('<br>')}<br><button onclick="show('coupons')">領取活動優惠券</button></div>
+ ${a.content?`<div class="box" style="white-space:pre-wrap">${esc(a.content)}</div>`:''}
+ <h3>熱銷排行榜</h3><div class="grid">${CAMP.top.map((p,i)=>`<div class="card"><div class="img" onclick="detail('${p.id}')" style="cursor:pointer;background-image:url('${esc(p.image_url||'')}')"></div><span class="mut">TOP ${i+1}</span>${a.discount_percent?' <span class="price">活動商品</span>':''}<div>${esc(p.name)}</div><div class="price">${money(p.price)}</div><div class="mut">已售 ${p.sold}</div><button onclick="detail('${p.id}')">查看商品</button></div>`).join('')||'<p class="mut">尚無商品</p>'}</div>`}
+
+const ben=c=>c.type==='amount'?`折抵 ${money(c.value)}`:c.type==='percent'?`${(100-c.value)/10} 折`:'免運費';
+const CF={coupons_avail:c=>['available','upcoming','soldout'].includes(c.status),coupons_claimed:c=>c.status==='claimed',coupons_soon:c=>c.soon,coupons_used:c=>c.status==='used',coupons_expired:c=>c.status==='expired'};
+const CL={coupons_avail:'可領取',coupons_claimed:'已領取',coupons_soon:'即將到期',coupons_used:'已使用',coupons_expired:'已過期'};
+async function loadCoupons(){try{CC=await api('/api/coupon-center');renderCoupons()}catch(e){toast(e.message)}}
+function renderCoupons(){const list=CC.filter(CF[CTAB]);
+ const act=c=>({available:`<button onclick="claim('${c.id}')">領取</button>`,claimed:`已領取 <button onclick="useCode('${c.code}')">去使用</button>`,used:'已使用',expired:'已過期',upcoming:'尚未開始',soldout:'已領完'}[c.status]);
+ $('coupons').innerHTML=`<h3>優惠券中心</h3>${!session?'<p class="mut">登入後才能領取與查看自己的優惠券</p>':''}<div>${Object.keys(CL).map(k=>`<button onclick="CTAB='${k}';renderCoupons()" style="${k===CTAB?'':'background:#888'}">${CL[k]}(${CC.filter(CF[k]).length})</button>`).join(' ')}</div>
+ ${list.map(c=>`<div class="box" style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;border-left:6px solid var(--red)"><div><b class="price" style="font-size:18px">${ben(c)}</b> ${esc(c.name)}<br><span class="mut">${c.min_spend?`低消 ${money(c.min_spend)}`:'無低消'}・${fmtDate(c.starts_at)} ~ ${fmtDate(c.ends_at)}</span><br>代碼:<b>${esc(c.code)}</b></div><div>${act(c)}</div></div>`).join('')||'<p class="mut">這個分類目前沒有優惠券</p>'}`}
+async function claim(id){try{if(!session)throw new Error('請先登入');await api('/api/coupons/'+id+'/claim',{method:'POST'});toast('領取成功');loadCoupons()}catch(e){toast(e.message)}}
+function useCode(code){appliedCode=code;$('code').value=code;show('cart')}
+
+const AF={coupons:[['code','代碼'],['name','名稱'],['type','類型','select',['amount','percent','free_shipping']],['value','金額 / 折掉%','number'],['min_spend','最低消費','number'],['starts_at','開始(台灣時間)','dt'],['ends_at','結束(台灣時間)','dt'],['max_uses','使用上限','number'],['claim_limit','發放數量','number'],['claim_required','需先領取','bool'],['active','啟用','bool']],
+ campaigns:[['name','名稱'],['starts_at','開始(台灣時間)','dt'],['ends_at','結束(台灣時間)','dt'],['discount_percent','全站折掉%','number'],['threshold_min','滿額門檻','number'],['threshold_off','滿額折抵','number'],['free_ship_min','免運門檻','number'],['allow_coupon','可併用優惠券','bool'],['banner_text','Banner 文字'],['content','活動內容'],['active','啟用','bool']]};
+function afField(r,[k,label,t,opts]){const id=`af_${r.id||'new'}_${k}`,v=r[k];
+ const inner=t==='bool'?`<input type="checkbox" id="${id}" ${(v===undefined?['active','allow_coupon'].includes(k):v)?'checked':''}>`
+ :t==='select'?`<select id="${id}">${opts.map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')}</select>`
+ :`<input id="${id}" type="${t==='dt'?'datetime-local':t==='number'?'number':'text'}" value="${esc(t==='dt'&&v?toLocal(v):v??'')}" style="width:${t==='number'?100:150}px">`;
+ return `<label class="mut" style="display:inline-block;margin-right:10px">${label}<br>${inner}</label>`}
+async function loadAdmin(k){AK=k||AK;if(!AF[AK])return loadAdminView();try{const rows=await api('/api/admin/'+AK);
+ $('admin').innerHTML=`<h3>後台管理</h3>${adminTabs()}
+ <p class="mut">時間請填台灣時間。type 選 free_shipping 就是免運券;percent 填「折掉幾 %」(10 = 9 折)。</p>
+ ${[{},...rows].map(r=>`<div class="box"><b>${r.id?esc(r.name||r.title):'新增'}</b><br>${AF[AK].map(f=>afField(r,f)).join('')}<br><button onclick="adminSave('${r.id||''}')">${r.id?'儲存':'建立'}</button> ${r.id?`<button onclick="adminDel('${r.id}')" style="background:#888">刪除</button>`:''}</div>`).join('')}`}catch(e){$('admin').innerHTML='';toast(e.message)}}
+async function adminSave(id){try{const body={};AF[AK].forEach(([k,,t])=>{const el=$(`af_${id||'new'}_${k}`);body[k]=t==='bool'?el.checked:t==='dt'?(el.value?new Date(el.value+':00+08:00').toISOString():null):el.value});
+ await api('/api/admin/'+AK+(id?'/'+id:''),{method:id?'PUT':'POST',body});toast(id?'已儲存':'已建立');loadAdmin();loadCampaign()}catch(e){toast(e.message)}}
+async function adminDel(id){if(!confirm('確定刪除?'))return;try{await api('/api/admin/'+AK+'/'+id,{method:'DELETE'});toast('已刪除');loadAdmin()}catch(e){toast(e.message)}}
+AF.announcements=[['title','標題'],['body','內容'],['active','啟用','bool']];
+AF.banners=[['title','標題'],['image_url','圖片網址'],['sort_order','排序','number'],['active','啟用','bool']];
+AF.product_categories=[['name','分類名稱']];
+const ADMIN_TABS=[['coupons','優惠券/免運券'],['campaigns','節慶活動'],['announcements','公告'],['banners','Banner'],['product_categories','商品分類'],['members','會員'],['merchants','商家'],['aproducts','商品'],['areviews','評論']];
+const adminTabs=()=>ADMIN_TABS.map(([k,l])=>`<button onclick="loadAdmin('${k}')" style="${AK===k?'':'background:#888'}">${l}</button>`).join(' ');
+const AMAP={members:'members',merchants:'merchants',aproducts:'products',areviews:'reviews'};
+async function loadAdminView(){try{const r=await api('/api/admin/'+AMAP[AK]),D=t=>new Date(t).toLocaleDateString('zh-TW',{timeZone:'Asia/Taipei'});let b='';
+ if(AK==='members')b=r.map(m=>`<div class="box">${esc(m.username)}・${esc(m.email)}・${D(m.created_at)} <select onchange="adminRole('${m.id}',this.value)">${['member','merchant','admin'].map(x=>`<option ${x===m.role?'selected':''}>${x}</option>`).join('')}</select></div>`).join('');
+ if(AK==='merchants')b=r.map(m=>`<div class="box"><b>${esc(m.name)}</b>・${esc(m.profiles&&m.profiles.username||'')}・${esc(m.contact||'')}・${m.suspended?'<b class="price">已停權</b>':'營業中'} <button onclick="adminSuspend('${m.id}',${!m.suspended})" style="background:#888">${m.suspended?'解除停權':'停權(商品全部下架)'}</button></div>`).join('');
+ if(AK==='aproducts')b=r.map(p=>`<div class="box">${esc(p.name)}・${esc(p.merchants&&p.merchants.name||'Hi-Qi 自營')}・${money(p.price)}・庫存 ${p.stock}・已售 ${p.sold}・${p.status==='active'?'上架中':'已下架'} <button onclick="adminProd('${p.id}','${p.status==='active'?'hidden':'active'}')" style="background:#888">${p.status==='active'?'下架':'重新上架'}</button></div>`).join('');
+ if(AK==='areviews')b=r.map(v=>`<div class="box">${esc(v.product||'')}・${esc(v.username)}・<span class="price">${stars(v.rating)}</span><button onclick="adminRev('${v.id}')" style="float:right;background:#888">刪除</button><br>${esc(v.content)}</div>`).join('');
+ $('admin').innerHTML=`<h3>後台管理</h3>${adminTabs()}${b||'<p class="mut">沒有資料</p>'}`}catch(e){$('admin').innerHTML='';toast(e.message)}}
+async function adminRole(id,role){try{await api('/api/admin/members/'+id+'/role',{method:'PUT',body:{role}});toast('已更新身分')}catch(e){toast(e.message);loadAdmin()}}
+async function adminSuspend(id,f){try{await api('/api/admin/merchants/'+id+'/suspend',{method:'PUT',body:{suspended:f}});toast(f?'已停權並下架該商家商品':'已解除停權');loadAdmin()}catch(e){toast(e.message)}}
+async function adminProd(id,status){try{await api('/api/admin/products/'+id+'/status',{method:'PUT',body:{status}});toast('已更新');loadAdmin();load()}catch(e){toast(e.message)}}
+async function adminRev(id){if(!confirm('確定刪除這則評論?'))return;try{await api('/api/admin/reviews/'+id,{method:'DELETE'});toast('已刪除');loadAdmin()}catch(e){toast(e.message)}}
+
+let SITE={banners:[],announcements:[]},bi=0;
+async function loadSite(){try{SITE=await api('/api/site');bi=0;drawSite()}catch(e){}}
+function drawSite(){const b=SITE.banners.length?SITE.banners[bi%SITE.banners.length]:null;
+ $('site').innerHTML=(b?`<div class="box" style="margin:0 0 12px;min-height:130px;background:#eee center/cover ${b.image_url?`url('${esc(b.image_url)}')`:''};display:flex;align-items:flex-end"><b style="background:rgba(0,0,0,.55);color:#fff;padding:6px 10px">${esc(b.title)}</b></div>`:'')
+ +(SITE.announcements.length?`<div class="box mut" style="margin:0 0 12px"><b>網站公告</b><br>${SITE.announcements.map(a=>esc(a.title)+(a.body?':'+esc(a.body):'')).join('<br>')}</div>`:'')}
+setInterval(()=>{if(SITE.banners.length>1){bi++;drawSite()}},5000);
+init();
+</script></body></html>
